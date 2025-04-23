@@ -5,6 +5,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import '../utils/constants.dart';
 import '../models/user.dart';
+import 'package:flutter/foundation.dart';
 
 class AuthService {
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
@@ -13,115 +14,90 @@ class AuthService {
     scopes: ['email', 'profile'],
   );
 
+  // Kiểm tra token hiện tại có còn hợp lệ không
+  Future<bool> isTokenValid() async {
+    try {
+      final token = await _storage.read(key: 'token');
+      
+      if (token == null) {
+        print('Token không tồn tại');
+        return false;
+      }
+      
+      print('Kiểm tra token: $token');
+      
+      // Kiểm tra token bằng cách gọi API lấy thông tin profile
+      final response = await http.get(
+        Uri.parse('$baseUrl/User/profile'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Accept': 'application/json',
+        },
+      ).timeout(const Duration(seconds: 15));
+      
+      print('Kiểm tra token - Status code: ${response.statusCode}');
+      if (response.statusCode != 200) {
+        print('Nội dung phản hồi: ${response.body}');
+      }
+      
+      // Nếu status code là 200, token vẫn hợp lệ
+      return response.statusCode == 200;
+    } catch (e) {
+      print('Lỗi khi kiểm tra token: $e');
+      return false;
+    }
+  }
+
   // Đăng nhập và lấy token
   Future<Map<String, dynamic>> login(String email, String password) async {
     try {
-      print('Gọi API login với email: $email');
-      final loginEndpoint = '$baseUrl/Auth/login';
-      print('Endpoint: $loginEndpoint');
+      final loginUrl = '$baseUrl/Auth/login';
+      debugPrint('CALLING API: $loginUrl');
       
-      // Cấu trúc request body theo Swagger API
-      final requestBody = {
-        'email': email,
-        'password': password,
-      };
-      
-      print('REQUEST BODY:');
-      print(jsonEncode(requestBody));
-      
-      // Cấu hình HTTP client với timeout
-      final client = http.Client();
-      http.Response? response;
-      
-      try {
-        // Sử dụng http.post trực tiếp với headers phù hợp
-        print('Đang gửi request đến server...');
-        response = await client.post(
-          Uri.parse(loginEndpoint),
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-          },
-          body: jsonEncode(requestBody),
-        ).timeout(
-          const Duration(seconds: 30),
-          onTimeout: () {
-            print('REQUEST TIMEOUT: Không nhận được phản hồi sau 30 giây');
-            throw TimeoutException('Thời gian kết nối quá lâu. Vui lòng thử lại sau.');
-          },
-        );
-      } catch (e) {
-        if (e is TimeoutException) {
-          print('Timeout exception: $e');
-          return {
-            'success': false,
-            'message': 'Kết nối đến server quá lâu. Vui lòng thử lại sau.',
-          };
+      final response = await http.post(
+        Uri.parse(loginUrl),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'email': email,
+          'password': password,
+        }),
+      );
+
+      debugPrint('LOGIN RESPONSE STATUS: ${response.statusCode}');
+      debugPrint('LOGIN RESPONSE BODY: ${response.body}');
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        final responseData = jsonDecode(response.body);
+        
+        // Lưu token vào storage nếu đăng nhập thành công
+        if (responseData['success'] == true && responseData['data'] != null) {
+          final token = responseData['data']['token'];
+          final userData = responseData['data']['user'];
+          
+          debugPrint('SAVING TOKEN: $token');
+          await _storage.write(key: 'token', value: token);
+          await _storage.write(key: 'userData', value: jsonEncode(userData));
+          
+          // Kiểm tra token đã lưu
+          final savedToken = await _storage.read(key: 'token');
+          debugPrint('SAVED TOKEN: $savedToken');
         }
-        print('Lỗi kết nối: ${e.toString()}');
-        return {
-          'success': false,
-          'message': 'Lỗi kết nối đến server: ${e.toString()}',
-        };
-      } finally {
-        // Đảm bảo client được đóng
-        client.close();
-      }
-      
-      print('======= PHẢN HỒI TỪ SERVER =======');
-      print('Status code: ${response.statusCode}');
-      print('Response headers: ${response.headers}');
-      print('Response body: ${response.body}');
-      print('===================================');
-      
-      if (response.body.isEmpty) {
-        print('Lỗi: Phản hồi trống từ server');
-        return {
-          'success': false,
-          'message': 'Phản hồi trống từ server. Vui lòng thử lại sau.',
-        };
-      }
-      
-      // Trích xuất dữ liệu từ phản hồi
-      final responseData = jsonDecode(response.body);
-      print('Phân tích phản hồi: $responseData');
-      
-      // Kiểm tra status code và cấu trúc phản hồi
-      if (response.statusCode == 200 && responseData['success'] == true) {
-        // Xử lý đúng cấu trúc phản hồi từ Azure API
-        final token = responseData['data']['token'];
-        final userData = responseData['data']['user'];
         
-        // Lưu token và dữ liệu người dùng
-        await _storage.write(key: 'token', value: token);
-        await _storage.write(key: 'userData', value: jsonEncode(userData));
-        
-        print('Đăng nhập thành công, đã lưu token và thông tin người dùng');
-        
-        return {
-          'success': true,
-          'token': token,
-          'user': User.fromJson(userData),
-        };
+        return responseData;
       } else {
-        // Xử lý lỗi từ server
-        String errorMessage = 'Đăng nhập thất bại';
-        if (responseData.containsKey('message')) {
-          errorMessage = responseData['message'];
-        }
-        
-        print('Lỗi đăng nhập: $errorMessage');
+        // Trả về một map với status false và thông báo lỗi
         return {
           'success': false,
-          'message': errorMessage,
+          'message': 'Lỗi ${response.statusCode}: ${response.reasonPhrase ?? "Không xác định"}',
         };
       }
-    } catch (e) {
-      print('Lỗi không xác định khi đăng nhập: $e');
-      print('Stack trace: ${e is Error ? e.stackTrace : "No stack trace"}');
+    } catch (error) {
+      debugPrint('LOGIN ERROR: $error');
       return {
         'success': false,
-        'message': 'Đã xảy ra lỗi: ${e.toString()}',
+        'message': 'Không thể kết nối đến máy chủ: $error',
       };
     }
   }
@@ -191,6 +167,10 @@ class AuthService {
             // Lưu token và thông tin user
             await _storage.write(key: 'token', value: token);
             await _storage.write(key: 'userData', value: jsonEncode(userData));
+            
+            // Kiểm tra token đã lưu
+            final savedToken = await _storage.read(key: 'token');
+            print('Token đã lưu: $savedToken');
             
             return {
               'success': true,
@@ -291,6 +271,7 @@ class AuthService {
     
     await _storage.delete(key: 'token');
     await _storage.delete(key: 'userData');
+    print('Đã đăng xuất và xóa token');
   }
 
   // Kiểm tra đã đăng nhập chưa
@@ -299,12 +280,39 @@ class AuthService {
     return token != null;
   }
 
-  // Lấy thông tin user đã lưu
+  /// Lấy thông tin người dùng từ API
   Future<User?> getUserData() async {
-    final userData = await _storage.read(key: 'userData');
-    if (userData != null) {
-      return User.fromJson(jsonDecode(userData));
+    try {
+      final token = await _storage.read(key: 'token');
+      if (token == null) {
+        debugPrint('getUserData: Không tìm thấy token');
+        return null;
+      }
+
+      final response = await http.get(
+        Uri.parse('$baseUrl/User/profile'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+      );
+
+      debugPrint('getUserData: Status code: ${response.statusCode}');
+      
+      if (response.statusCode == 200) {
+        final userData = jsonDecode(response.body);
+        debugPrint('getUserData: Dữ liệu người dùng: $userData');
+        return User.fromJson(userData);
+      } else if (response.statusCode == 401) {
+        debugPrint('getUserData: Token hết hạn hoặc không hợp lệ');
+        return null;
+      } else {
+        debugPrint('getUserData: Lỗi ${response.statusCode} - ${response.body}');
+        return null;
+      }
+    } catch (e) {
+      debugPrint('getUserData: Exception $e');
+      return null;
     }
-    return null;
   }
 } 

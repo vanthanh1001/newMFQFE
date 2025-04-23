@@ -3,15 +3,15 @@ import 'package:provider/provider.dart';
 import '../auth/login_screen.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/exercise_provider.dart';
+import '../../providers/challenge_provider.dart';
 import '../../utils/constants.dart';
 import '../exercise/exercise_list_screen.dart';
 import '../exercise/exercise_detail_screen.dart';
-
-// Tạm comment import này và làm placeholder
-// import '../exercise/exercise_list_screen.dart';
+import '../challenge/challenges_screen.dart';
+import '../../models/challenge/challenge_model.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  const HomeScreen({Key? key}) : super(key: key);
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -22,21 +22,127 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isInit = false;
 
   @override
+  void initState() {
+    super.initState();
+    _selectedIndex = 0;
+    
+    // Dùng Future.microtask để đảm bảo context đã sẵn sàng
+    Future.microtask(() {
+      _loadInitialData();
+    });
+  }
+
+  @override
   void didChangeDependencies() {
     if (!_isInit) {
       _isInit = true;
-      // Tải dữ liệu bài tập khi vào app
-      _loadExercises();
+      _loadInitialData();
     }
     super.didChangeDependencies();
   }
 
+  Future<void> _loadInitialData() async {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      
+      try {
+        // Kiểm tra token có hợp lệ không
+        final authProvider = Provider.of<AuthProvider>(context, listen: false);
+        bool isValid = await authProvider.isTokenValid();
+        
+        if (!isValid) {
+          _handleSessionExpired();
+          return;
+        }
+        
+        // Tải dữ liệu bài tập
+        final exerciseProvider = Provider.of<ExerciseProvider>(context, listen: false);
+        await exerciseProvider.fetchExercises();
+        
+        // Tải thử thách
+        final challengeProvider = Provider.of<ChallengeProvider>(context, listen: false);
+        await challengeProvider.fetchActiveChallenges();
+      } catch (e) {
+        debugPrint('Lỗi khi tải dữ liệu ban đầu: $e');
+        if (e.toString().contains('401') || 
+            e.toString().contains('unauthorized') ||
+            e.toString().contains('hết hạn')) {
+          _handleSessionExpired();
+        }
+      }
+    });
+  }
+  
+  // Tách các phương thức tải dữ liệu riêng biệt
   Future<void> _loadExercises() async {
+    if (!mounted) return;
     try {
-      await Provider.of<ExerciseProvider>(context, listen: false).fetchExercises();
-    } catch (error) {
-      // Xử lý lỗi nếu cần
+      final exerciseProvider = Provider.of<ExerciseProvider>(context, listen: false);
+      await exerciseProvider.fetchExercises();
+    } catch (e) {
+      debugPrint('Lỗi khi tải bài tập: $e');
     }
+  }
+  
+  Future<void> _loadChallenges() async {
+    if (!mounted) return;
+    try {
+      final challengeProvider = Provider.of<ChallengeProvider>(context, listen: false);
+      await challengeProvider.fetchActiveChallenges();
+    } catch (e) {
+      debugPrint('Lỗi khi tải thử thách: $e');
+      // Kiểm tra nếu session đã hết hạn
+      if (e.toString().contains('401') || 
+          e.toString().contains('unauthorized') ||
+          e.toString().contains('hết hạn')) {
+        final challengeProvider = Provider.of<ChallengeProvider>(context, listen: false);
+        if (challengeProvider.sessionExpired) {
+          _handleSessionExpired();
+        }
+      }
+    }
+  }
+  
+  void _handleSessionExpired() {
+    // Sử dụng Future.microtask để tránh gọi setState trong build
+    Future.microtask(() async {
+      try {
+        final authProvider = Provider.of<AuthProvider>(context, listen: false);
+        final challengeProvider = Provider.of<ChallengeProvider>(context, listen: false);
+        
+        // Đăng xuất người dùng
+        await authProvider.logout();
+        
+        // Reset trạng thái phiên
+        if (challengeProvider.sessionExpired) {
+          challengeProvider.resetSessionState();
+        }
+        
+        // Chuyển hướng đến màn hình đăng nhập với hướng dẫn
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại'),
+              backgroundColor: Colors.red,
+              duration: Duration(seconds: 5),
+            ),
+          );
+          
+          Navigator.of(context).pushAndRemoveUntil(
+            MaterialPageRoute(builder: (context) => const LoginScreen()),
+            (route) => false,
+          );
+        }
+      } catch (e) {
+        debugPrint('Lỗi khi xử lý phiên hết hạn: $e');
+        if (mounted) {
+          Navigator.of(context).pushAndRemoveUntil(
+            MaterialPageRoute(builder: (context) => const LoginScreen()),
+            (route) => false,
+          );
+        }
+      }
+    });
   }
 
   @override
@@ -49,8 +155,17 @@ class _HomeScreenState extends State<HomeScreen> {
       _buildHomeScreen(),
       const ExerciseListScreen(),
       _buildWorkoutPlanScreen(),
+      const ChallengesScreen(),
       _buildProfileScreen(),
     ];
+
+    // Kiểm tra trạng thái phiên
+    final challengeProvider = Provider.of<ChallengeProvider>(context);
+    if (challengeProvider.sessionExpired) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _handleSessionExpired();
+      });
+    }
 
     return Scaffold(
       body: _screens[_selectedIndex],
@@ -69,13 +184,17 @@ class _HomeScreenState extends State<HomeScreen> {
             label: 'Lịch tập',
           ),
           BottomNavigationBarItem(
+            icon: Icon(Icons.emoji_events),
+            label: 'Thử thách',
+          ),
+          BottomNavigationBarItem(
             icon: Icon(Icons.person),
             label: 'Hồ sơ',
           ),
         ],
         currentIndex: _selectedIndex,
-        selectedItemColor: AppColors.primary,
-        unselectedItemColor: AppColors.textLight,
+        selectedItemColor: Colors.blue,
+        unselectedItemColor: Colors.grey,
         type: BottomNavigationBarType.fixed,
         onTap: (index) {
           setState(() {
@@ -98,7 +217,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     : null,
               ),
               decoration: const BoxDecoration(
-                color: AppColors.primary,
+                color: Colors.blue,
               ),
             ),
             ListTile(
@@ -106,23 +225,13 @@ class _HomeScreenState extends State<HomeScreen> {
               title: const Text('Cài đặt'),
               onTap: () {
                 Navigator.pop(context);
-                // TODO: Navigate to settings screen
+                // TODO: Implement settings screen
               },
             ),
             ListTile(
               leading: const Icon(Icons.logout),
               title: const Text('Đăng xuất'),
-              onTap: () async {
-                Navigator.pop(context);
-                await authProvider.logout();
-                if (mounted) {
-                  Navigator.of(context).pushReplacement(
-                    MaterialPageRoute(
-                      builder: (context) => const LoginScreen(),
-                    ),
-                  );
-                }
-              },
+              onTap: () => _handleLogout(),
             ),
           ],
         ),
@@ -130,40 +239,32 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  // Home Screen
   Widget _buildHomeScreen() {
     return SafeArea(
       child: SingleChildScrollView(
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Header với lời chào
-              const SizedBox(height: 8),
-              _buildWelcomeHeader(),
-              const SizedBox(height: 24),
-              
-              // Thống kê tập luyện
-              _buildWorkoutStats(),
-              const SizedBox(height: 24),
-              
-              // Bài tập nổi bật
-              _buildFeaturedExercises(),
-              const SizedBox(height: 24),
-              
-              // Mục tiêu tập luyện
-              _buildWorkoutGoals(),
-              const SizedBox(height: 24),
-              
-              // Tips và tin tức
-              _buildTipsAndNews(),
-            ],
-          ),
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildWelcomeHeader(),
+            const SizedBox(height: 24),
+            
+            _buildWorkoutStats(),
+            const SizedBox(height: 24),
+            
+            _buildFeaturedExercises(),
+            const SizedBox(height: 24),
+            
+            _buildActiveChallenges(),
+            const SizedBox(height: 24),
+          ],
         ),
       ),
     );
   }
 
+  // Welcome Header
   Widget _buildWelcomeHeader() {
     final user = Provider.of<AuthProvider>(context).user;
     final greeting = _getGreeting();
@@ -173,643 +274,223 @@ class _HomeScreenState extends State<HomeScreen> {
       children: [
         Text(
           '$greeting,',
-          style: AppTextStyles.body.copyWith(
-            color: AppColors.textLight,
+          style: const TextStyle(
+            fontSize: 16,
+            color: Colors.grey,
           ),
         ),
-        const SizedBox(height: 4),
         Text(
-          user?.name ?? 'User',
-          style: AppTextStyles.heading1,
-        ),
-        const SizedBox(height: 8),
-        const Text(
-          'Hãy tiếp tục phát triển bản thân với MFQuest!',
-          style: AppTextStyles.body,
+          user?.name ?? 'Người dùng',
+          style: const TextStyle(
+            fontSize: 24,
+            fontWeight: FontWeight.bold,
+          ),
         ),
       ],
     );
   }
 
+  // Workout Stats
   Widget _buildWorkoutStats() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              'Thống kê tập luyện',
-              style: AppTextStyles.heading2,
-            ),
-            TextButton(
-              onPressed: () {
-                // TODO: Navigate to detailed stats
-              },
-              child: const Text('Xem thêm'),
-            ),
-          ],
-        ),
-        const SizedBox(height: 16),
-        Row(
-          children: [
-            Expanded(
-              child: _buildStatCard(
-                title: 'Buổi tập',
-                value: '12',
-                icon: Icons.fitness_center,
-                color: AppColors.primary,
-              ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: _buildStatCard(
-                title: 'Bài tập',
-                value: '36',
-                icon: Icons.sports_gymnastics,
-                color: AppColors.secondary,
-              ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: _buildStatCard(
-                title: 'Phút',
-                value: '345',
-                icon: Icons.timer,
-                color: AppColors.accent,
-              ),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildStatCard({
-    required String title,
-    required String value,
-    required IconData icon,
-    required Color color,
-  }) {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.1),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: color.withOpacity(0.2),
-        ),
+        color: Colors.blue.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(16),
       ),
       child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(
-            icon,
-            color: color,
-            size: 24,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            value,
-            style: AppTextStyles.heading2.copyWith(
-              color: color,
+          const Text(
+            'Thống kê tuần này',
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
             ),
           ),
-          const SizedBox(height: 4),
-          Text(
-            title,
-            style: AppTextStyles.caption,
-            textAlign: TextAlign.center,
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              _buildStatItem(
+                icon: Icons.fitness_center,
+                title: 'Buổi tập',
+                value: '5',
+              ),
+              _buildStatItem(
+                icon: Icons.local_fire_department,
+                title: 'Calories',
+                value: '1200',
+              ),
+              _buildStatItem(
+                icon: Icons.timelapse,
+                title: 'Thời gian',
+                value: '4h 20m',
+              ),
+            ],
           ),
         ],
       ),
     );
   }
 
+  // Stat Item
+  Widget _buildStatItem({
+    required IconData icon,
+    required String title,
+    required String value,
+  }) {
+    return Expanded(
+      child: Column(
+        children: [
+          Icon(
+            icon,
+            color: Colors.blue,
+            size: 28,
+          ),
+          const SizedBox(height: 8),
+          Text(
+            value,
+            style: const TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          Text(
+            title,
+            style: const TextStyle(
+              fontSize: 14,
+              color: Colors.grey,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Featured Exercises
   Widget _buildFeaturedExercises() {
     final exerciseProvider = Provider.of<ExerciseProvider>(context);
     final exercises = exerciseProvider.exercises;
     final featuredExercises = exercises.length > 5 
         ? exercises.sublist(0, 5) 
         : exercises;
-
+    
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(
-              'Bài tập nổi bật',
-              style: AppTextStyles.heading2,
+            const Text(
+              'Bài tập phổ biến',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
             ),
             TextButton(
               onPressed: () {
                 setState(() {
-                  _selectedIndex = 1; // Chuyển đến tab Bài tập
+                  _selectedIndex = 1; // Switch to Exercises tab
                 });
               },
               child: const Text('Xem tất cả'),
             ),
           ],
         ),
-        const SizedBox(height: 16),
-        
-        if (exerciseProvider.isLoading)
-          const Center(
-            child: Padding(
-              padding: EdgeInsets.all(32.0),
-              child: CircularProgressIndicator(),
+        const SizedBox(height: 12),
+        exerciseProvider.isLoading
+            ? const Center(child: CircularProgressIndicator())
+            : featuredExercises.isEmpty
+                ? const Center(
+                    child: Text('Không có bài tập nào'),
+                  )
+                : SizedBox(
+                    height: 180,
+                    child: ListView.builder(
+                      scrollDirection: Axis.horizontal,
+                      itemCount: featuredExercises.length,
+                      itemBuilder: (context, index) {
+                        final exercise = featuredExercises[index];
+                        return _buildExerciseCard(exercise);
+                      },
+                    ),
+                  ),
+      ],
+    );
+  }
+
+  // Exercise Card
+  Widget _buildExerciseCard(dynamic exercise) {
+    return GestureDetector(
+      onTap: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => ExerciseDetailScreen(exerciseId: exercise.id),
+          ),
+        );
+      },
+      child: Container(
+        width: 150,
+        margin: const EdgeInsets.only(right: 12),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.05),
+              blurRadius: 8,
+              offset: const Offset(0, 2),
             ),
-          )
-        else if (exercises.isEmpty)
-          Center(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 32.0),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Exercise Image or Icon
+            Container(
+              height: 100,
+              decoration: BoxDecoration(
+                color: Colors.blue.withOpacity(0.1),
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(12),
+                  topRight: Radius.circular(12),
+                ),
+              ),
+              child: const Center(
+                child: Icon(
+                  Icons.fitness_center,
+                  size: 40,
+                  color: Colors.blue,
+                ),
+              ),
+            ),
+            
+            // Exercise Info
+            Padding(
+              padding: const EdgeInsets.all(12),
               child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(
-                    Icons.fitness_center,
-                    size: 48,
-                    color: AppColors.textLight.withOpacity(0.5),
+                  Text(
+                    exercise.name?.toString() ?? 'Bài tập',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
-                  const SizedBox(height: 16),
-                  const Text(
-                    'Chưa có bài tập nào',
-                    style: AppTextStyles.body,
-                  ),
-                  const SizedBox(height: 8),
-                  ElevatedButton(
-                    onPressed: () {
-                      setState(() {
-                        _selectedIndex = 1; // Chuyển đến tab Bài tập
-                      });
-                    },
-                    child: const Text('Khám phá bài tập'),
+                  const SizedBox(height: 4),
+                  Text(
+                    exercise.muscleGroup?.toString() ?? 'Chưa phân loại',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Colors.grey,
+                    ),
                   ),
                 ],
               ),
-            ),
-          )
-        else
-          SizedBox(
-            height: 180,
-            child: ListView.builder(
-              scrollDirection: Axis.horizontal,
-              itemCount: featuredExercises.length,
-              itemBuilder: (ctx, index) {
-                final exercise = featuredExercises[index];
-                return GestureDetector(
-                  onTap: () {
-                    Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (ctx) => ExerciseDetailScreen(exerciseId: exercise.id),
-                      ),
-                    );
-                  },
-                  child: Container(
-                    width: 160,
-                    margin: const EdgeInsets.only(right: 16),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(12),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.05),
-                          blurRadius: 10,
-                          offset: const Offset(0, 2),
-                        ),
-                      ],
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        // Biểu tượng nhóm cơ
-                        Container(
-                          height: 100,
-                          decoration: BoxDecoration(
-                            color: AppColors.primary.withOpacity(0.1),
-                            borderRadius: const BorderRadius.only(
-                              topLeft: Radius.circular(12),
-                              topRight: Radius.circular(12),
-                            ),
-                          ),
-                          alignment: Alignment.center,
-                          child: _getIconForMuscleGroup(exercise.muscleGroup),
-                        ),
-                        Padding(
-                          padding: const EdgeInsets.all(12.0),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                exercise.name,
-                                style: AppTextStyles.body.copyWith(
-                                  fontWeight: FontWeight.bold,
-                                ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                '${exercise.sets} Set • ${exercise.reps} Rep',
-                                style: AppTextStyles.caption,
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
-      ],
-    );
-  }
-
-  Widget _buildWorkoutGoals() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Mục tiêu của bạn',
-          style: AppTextStyles.heading2,
-        ),
-        const SizedBox(height: 16),
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: AppColors.primary.withOpacity(0.1),
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 60,
-                height: 60,
-                decoration: BoxDecoration(
-                  color: AppColors.primary.withOpacity(0.2),
-                  shape: BoxShape.circle,
-                ),
-                child: const Center(
-                  child: Icon(
-                    Icons.directions_run,
-                    color: AppColors.primary,
-                    size: 32,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Tập luyện 5 ngày/tuần',
-                      style: AppTextStyles.heading3,
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      'Bạn đã hoàn thành 3/5 ngày tuần này',
-                      style: AppTextStyles.body.copyWith(
-                        color: AppColors.textLight,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    LinearProgressIndicator(
-                      value: 0.6,
-                      backgroundColor: AppColors.surface,
-                      valueColor: const AlwaysStoppedAnimation<Color>(
-                        AppColors.primary,
-                      ),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildTipsAndNews() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Mẹo & tin tức',
-          style: AppTextStyles.heading2,
-        ),
-        const SizedBox(height: 16),
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(12),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.05),
-                blurRadius: 10,
-                offset: const Offset(0, 2),
-              ),
-            ],
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 80,
-                height: 80,
-                decoration: BoxDecoration(
-                  color: AppColors.accent.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: const Center(
-                  child: Icon(
-                    Icons.lightbulb_outline,
-                    color: AppColors.accent,
-                    size: 40,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      '5 mẹo tăng hiệu quả tập luyện',
-                      style: AppTextStyles.heading3,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Tìm hiểu các phương pháp giúp tăng hiệu quả tập luyện và đạt kết quả tốt hơn.',
-                      style: AppTextStyles.caption.copyWith(
-                        color: AppColors.textLight,
-                      ),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildWorkoutPlanScreen() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const Icon(
-            Icons.calendar_today,
-            size: 100,
-            color: AppColors.primary,
-          ),
-          const SizedBox(height: 16),
-          const Text(
-            'Lịch tập luyện',
-            style: AppTextStyles.heading1,
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'Tính năng đang được phát triển',
-            style: TextStyle(color: AppColors.textLight),
-          ),
-          const SizedBox(height: 24),
-          ElevatedButton(
-            onPressed: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Tính năng lịch tập đang được phát triển'),
-                ),
-              );
-            },
-            child: const Text('Thử lại'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildProfileScreen() {
-    final user = Provider.of<AuthProvider>(context).user;
-    
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          const SizedBox(height: 32),
-          CircleAvatar(
-            radius: 60,
-            backgroundImage: user?.profilePicture != null 
-                ? NetworkImage(user!.profilePicture!) 
-                : null,
-            child: user?.profilePicture == null 
-                ? const Icon(Icons.person, size: 60) 
-                : null,
-          ),
-          const SizedBox(height: 16),
-          Text(
-            user?.name ?? 'User',
-            style: AppTextStyles.heading1,
-            textAlign: TextAlign.center,
-          ),
-          Text(
-            user?.email ?? 'email@example.com',
-            style: AppTextStyles.body.copyWith(
-              color: AppColors.textLight,
-            ),
-          ),
-          const SizedBox(height: 32),
-          
-          // Thông tin cá nhân
-          _buildProfileInfoCard(),
-          const SizedBox(height: 24),
-          
-          // Các tùy chọn khác
-          _buildProfileOptions(),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildProfileInfoCard() {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 10,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Column(
-        children: [
-          _buildProfileInfoItem(
-            icon: Icons.person,
-            title: 'Họ tên',
-            value: 'Nguyễn Văn A',
-          ),
-          const Divider(),
-          _buildProfileInfoItem(
-            icon: Icons.calendar_today,
-            title: 'Ngày sinh',
-            value: '01/01/1990',
-          ),
-          const Divider(),
-          _buildProfileInfoItem(
-            icon: Icons.height,
-            title: 'Chiều cao',
-            value: '170 cm',
-          ),
-          const Divider(),
-          _buildProfileInfoItem(
-            icon: Icons.monitor_weight,
-            title: 'Cân nặng',
-            value: '65 kg',
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildProfileInfoItem({
-    required IconData icon,
-    required String title,
-    required String value,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8.0),
-      child: Row(
-        children: [
-          Icon(
-            icon,
-            color: AppColors.primary,
-          ),
-          const SizedBox(width: 16),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: AppTextStyles.caption,
-              ),
-              Text(
-                value,
-                style: AppTextStyles.body,
-              ),
-            ],
-          ),
-          const Spacer(),
-          IconButton(
-            icon: const Icon(
-              Icons.edit,
-              color: AppColors.secondary,
-              size: 18,
-            ),
-            onPressed: () {
-              // TODO: Implement edit profile
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildProfileOptions() {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 10,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Column(
-        children: [
-          _buildProfileOptionItem(
-            icon: Icons.settings,
-            title: 'Cài đặt tài khoản',
-            onTap: () {
-              // TODO: Implement settings
-            },
-          ),
-          const Divider(height: 1),
-          _buildProfileOptionItem(
-            icon: Icons.language,
-            title: 'Ngôn ngữ',
-            onTap: () {
-              // TODO: Implement language settings
-            },
-          ),
-          const Divider(height: 1),
-          _buildProfileOptionItem(
-            icon: Icons.help_outline,
-            title: 'Trợ giúp & Hỗ trợ',
-            onTap: () {
-              // TODO: Implement help
-            },
-          ),
-          const Divider(height: 1),
-          _buildProfileOptionItem(
-            icon: Icons.info_outline,
-            title: 'Về ứng dụng',
-            onTap: () {
-              // TODO: Implement about
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildProfileOptionItem({
-    required IconData icon,
-    required String title,
-    required VoidCallback onTap,
-  }) {
-    return InkWell(
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: 16.0,
-          vertical: 12.0,
-        ),
-        child: Row(
-          children: [
-            Icon(
-              icon,
-              color: AppColors.primary,
-            ),
-            const SizedBox(width: 16),
-            Text(
-              title,
-              style: AppTextStyles.body,
-            ),
-            const Spacer(),
-            const Icon(
-              Icons.arrow_forward_ios,
-              color: AppColors.textLight,
-              size: 16,
             ),
           ],
         ),
@@ -817,39 +498,195 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _getIconForMuscleGroup(String muscleGroup) {
-    IconData iconData;
-    switch (muscleGroup) {
-      case 'Ngực':
-        iconData = Icons.fitness_center;
-        break;
-      case 'Lưng':
-        iconData = Icons.accessibility_new;
-        break;
-      case 'Vai':
-        iconData = Icons.accessibility;
-        break;
-      case 'Tay':
-        iconData = Icons.sports_gymnastics;
-        break;
-      case 'Chân':
-        iconData = Icons.directions_run;
-        break;
-      case 'Bụng':
-        iconData = Icons.sports_martial_arts;
-        break;
-      default:
-        iconData = Icons.fitness_center;
-        break;
-    }
-    
-    return Icon(
-      iconData,
-      size: 48,
-      color: AppColors.primary,
+  // Active Challenges
+  Widget _buildActiveChallenges() {
+    return Consumer<ChallengeProvider>(
+      builder: (context, provider, _) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'Thử thách đang diễn ra',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                TextButton(
+                  onPressed: () {
+                    setState(() {
+                      _selectedIndex = 3; // Chuyển đến tab Thử thách
+                    });
+                  },
+                  child: const Text('Xem tất cả'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            
+            if (provider.isLoading)
+              const Center(child: CircularProgressIndicator())
+            else if (provider.error != null)
+              Center(
+                child: Text(
+                  'Lỗi: ${provider.error}',
+                  style: const TextStyle(color: Colors.red),
+                ),
+              )
+            else if (provider.activeChallenges.isEmpty)
+              const Center(
+                child: Text('Không có thử thách nào đang diễn ra'),
+              )
+            else
+              SizedBox(
+                height: 180,
+                child: ListView.builder(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: provider.activeChallenges.length > 3 
+                    ? 3 : provider.activeChallenges.length,
+                  itemBuilder: (context, index) {
+                    final challenge = provider.activeChallenges[index];
+                    return _buildChallengeCard(challenge);
+                  },
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 
+  // Challenge Card
+  Widget _buildChallengeCard(Challenge challenge) {
+    return Container(
+      width: 250,
+      margin: const EdgeInsets.only(right: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Challenge image or banner
+          Container(
+            height: 100,
+            decoration: BoxDecoration(
+              color: Colors.blue.withOpacity(0.2),
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(12),
+                topRight: Radius.circular(12),
+              ),
+            ),
+            child: const Center(
+              child: Icon(
+                Icons.emoji_events,
+                size: 40,
+                color: Colors.blue,
+              ),
+            ),
+          ),
+          
+          // Challenge info
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  challenge.name,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  challenge.description,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey,
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Placeholder for workout plan screen
+  Widget _buildWorkoutPlanScreen() {
+    return const Center(
+      child: Text('Màn hình lịch tập đang được phát triển'),
+    );
+  }
+
+  // Placeholder for profile screen
+  Widget _buildProfileScreen() {
+    return Container(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          // Thêm ảnh đại diện hoặc icon người dùng
+          const CircleAvatar(
+            radius: 50,
+            backgroundColor: Colors.blue,
+            child: Icon(
+              Icons.person,
+              size: 60,
+              color: Colors.white,
+            ),
+          ),
+          const SizedBox(height: 20),
+          const Text(
+            'Thông tin người dùng',
+            style: TextStyle(
+              fontSize: 24,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 40),
+          // Nút đăng xuất
+          ElevatedButton.icon(
+            icon: const Icon(Icons.logout),
+            label: const Text('Đăng xuất'),
+            style: ElevatedButton.styleFrom(
+              foregroundColor: Colors.white,
+              backgroundColor: Colors.red,
+              padding: const EdgeInsets.symmetric(
+                horizontal: 30,
+                vertical: 15,
+              ),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+            onPressed: _handleLogout,
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Get greeting based on time of day
   String _getGreeting() {
     final hour = DateTime.now().hour;
     if (hour < 12) {
@@ -859,5 +696,42 @@ class _HomeScreenState extends State<HomeScreen> {
     } else {
       return 'Chào buổi tối';
     }
+  }
+
+  // Handle logout
+  void _handleLogout() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Xác nhận'),
+        content: const Text('Bạn có chắc chắn muốn đăng xuất?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Hủy'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              _confirmLogout();
+            },
+            child: const Text('Đăng xuất'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _confirmLogout() async {
+    final authProvider = Provider.of<AuthProvider>(context, listen: false);
+    final challengeProvider = Provider.of<ChallengeProvider>(context, listen: false);
+    
+    await authProvider.logout();
+    challengeProvider.resetSessionState();
+    
+    if (!mounted) return;
+    
+    // Chuyển về màn hình đăng nhập
+    Navigator.of(context).pushReplacementNamed(LoginScreen.routePath);
   }
 } 

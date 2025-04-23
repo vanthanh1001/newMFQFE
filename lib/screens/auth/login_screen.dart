@@ -5,9 +5,12 @@ import '../../providers/auth_provider.dart';
 import '../../utils/constants.dart';
 import 'register_screen.dart';
 import 'forgot_password_screen.dart';
+import '../home/home_screen.dart';
 
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key});
+  static const String routePath = '/login';
+
+  const LoginScreen({Key? key}) : super(key: key);
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -30,115 +33,79 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<void> _login() async {
-    if (!_formKey.currentState!.validate()) {
-      return;
-    }
+    setState(() {
+      _isLoading = true;
+      _errorMessage = '';
+    });
 
     try {
-      // Ẩn bàn phím
-      FocusScope.of(context).unfocus();
+      if (_formKey.currentState!.validate()) {
+        final email = _emailController.text.trim();
+        final password = _passwordController.text;
 
-      // Xóa mọi thông báo lỗi trước đó
-      Provider.of<AuthProvider>(context, listen: false).clearError();
+        final authProvider = Provider.of<AuthProvider>(context, listen: false);
+        
+        // In thông tin debug trước khi đăng nhập
+        print('Bắt đầu đăng nhập với email: $email');
+        
+        final success = await authProvider.login(email, password);
 
-      // Hiển thị thông báo đang xử lý
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Đang đăng nhập...'),
-          duration: Duration(seconds: 1),
-        ),
-      );
+        // In ra thông tin debug để xác định trạng thái đăng nhập
+        print('Đăng nhập thành công: $success');
+        print('Token sau khi đăng nhập: ${authProvider.token}');
+        print('Thông tin người dùng: ${authProvider.user?.toJson()}');
 
-      // Debug thông tin đăng nhập
-      print('============ ĐĂNG NHẬP ============');
-      print('Email: ${_emailController.text.trim()}');
-      print('Password: ${_passwordController.text.length} ký tự');
-      print('===================================');
-
-      // Gọi login từ provider
-      final success = await Provider.of<AuthProvider>(context, listen: false)
-          .login(_emailController.text.trim(), _passwordController.text.trim());
-      
-      if (success && mounted) {
-        // Hiển thị thông báo thành công nếu cần
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Đăng nhập thành công!'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      } else if (mounted) {
-        // Hiển thị thông báo lỗi nếu đăng nhập thất bại
-        final errorMessage = Provider.of<AuthProvider>(context, listen: false).errorMessage;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Đăng nhập thất bại: ${errorMessage ?? 'Lỗi không xác định'}'),
-            backgroundColor: AppColors.error,
-            duration: const Duration(seconds: 3),
-          ),
-        );
+        if (success) {
+          // Chuyển đến trang chính khi đăng nhập thành công
+          if (mounted) {
+            print('Chuyển hướng đến màn hình chính');
+            Navigator.pushAndRemoveUntil(
+              context,
+              MaterialPageRoute(builder: (context) => const HomeScreen()),
+              (route) => false,
+            );
+          }
+        } else {
+          if (mounted) {
+            setState(() {
+              _errorMessage = 'Đăng nhập thất bại. Vui lòng kiểm tra lại email và mật khẩu.';
+            });
+          }
+        }
       }
     } catch (e) {
-      // Xử lý các lỗi không mong muốn
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Lỗi không xác định: ${e.toString()}'),
-            backgroundColor: AppColors.error,
-            duration: const Duration(seconds: 5),
-          ),
-        );
+        setState(() {
+          _errorMessage = 'Đã xảy ra lỗi: ${e.toString()}';
+        });
+      }
+      print('Lỗi đăng nhập: $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
       }
     }
   }
 
   Future<void> _googleLogin() async {
     try {
-      // Xóa mọi thông báo lỗi trước đó
-      Provider.of<AuthProvider>(context, listen: false).clearError();
-
-      // Hiển thị thông báo đang xử lý
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Đang đăng nhập với Google...'),
-          duration: Duration(seconds: 1),
-        ),
-      );
-
-      // Gọi đăng nhập Google từ provider
-      final success = await Provider.of<AuthProvider>(context, listen: false)
-          .signInWithGoogle();
+      final authProvider = Provider.of<AuthProvider>(context, listen: false);
+      final success = await authProvider.signInWithGoogle();
+      
+      print('Đăng nhập Google thành công: $success');
       
       if (success && mounted) {
-        // Hiển thị thông báo thành công
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Đăng nhập Google thành công!'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      } else if (mounted) {
-        // Hiển thị thông báo lỗi nếu đăng nhập thất bại
-        final errorMessage = Provider.of<AuthProvider>(context, listen: false).errorMessage;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Đăng nhập Google thất bại: ${errorMessage ?? 'Lỗi không xác định'}'),
-            backgroundColor: AppColors.error,
-            duration: const Duration(seconds: 3),
-          ),
+        // Chuyển hướng đến màn hình chính
+        print('Chuyển hướng đến màn hình chính');
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (context) => const HomeScreen()),
         );
       }
-    } catch (e) {
-      // Xử lý các lỗi không mong muốn
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Lỗi không xác định: ${e.toString()}'),
-            backgroundColor: AppColors.error,
-            duration: const Duration(seconds: 5),
-          ),
-        );
-      }
+    } catch (error) {
+      print('Lỗi khi đăng nhập với Google: $error');
+      // Error is handled in the AuthProvider
     }
   }
 
